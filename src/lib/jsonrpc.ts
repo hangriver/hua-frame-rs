@@ -64,6 +64,12 @@ export class JsonRpcClient {
         }
       };
 
+      ws.onerror = () => {
+        // Reject the connect promise on initial connection failure.
+        // After the connection is established, errors are handled by onclose.
+        reject(new Error("Failed to connect to " + url));
+      };
+
       ws.onclose = (event: CloseEvent) => {
         console.log("[jsonrpc] disconnected:", event.code, event.reason);
         // Reject all pending calls.
@@ -73,12 +79,6 @@ export class JsonRpcClient {
         }
         this.pending.clear();
         this.ws = null;
-      };
-
-      ws.onerror = () => {
-        if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          reject(new Error("Failed to connect"));
-        }
       };
     });
   }

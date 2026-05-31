@@ -128,6 +128,8 @@
         value,
       })) as SetBrightnessResult;
       brightness = result.brightness;
+      // Keep the System Info card in sync.
+      if (deviceInfo) deviceInfo = { ...deviceInfo, brightness: result.brightness };
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -142,6 +144,8 @@
         value,
       })) as SetVolumeResult;
       volume = result.volume;
+      // Keep the System Info card in sync.
+      if (deviceInfo) deviceInfo = { ...deviceInfo, volume: result.volume };
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

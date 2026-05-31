@@ -1,22 +1,66 @@
 <script lang="ts">
   import { JsonRpcClient } from "$lib/jsonrpc";
-  import type { SystemInfo } from "$lib/types";
+  import type {
+    SystemInfo,
+    PluginSummary,
+    ResourceItem,
+    RemoteKey,
+    PluginListResult,
+    ProviderListResult,
+    ResourceListResult,
+    SetBrightnessResult,
+    SetVolumeResult,
+    RemoteKeyResult,
+  } from "$lib/types";
 
+  // ── Connection state ──────────────────────────────────────────────
   let wsUrl = $state("ws://127.0.0.1:19315");
   let connected = $state(false);
   let connecting = $state(false);
-  let deviceInfo = $state<SystemInfo | null>(null);
   let error = $state<string | null>(null);
-  let loading = $state(false);
 
   const client = new JsonRpcClient();
 
+  // ── Tab state ─────────────────────────────────────────────────────
+  type Tab = "device" | "plugins" | "resources" | "remote";
+  let activeTab = $state<Tab>("device");
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "device", label: "Device" },
+    { id: "plugins", label: "Plugins" },
+    { id: "resources", label: "Resources" },
+    { id: "remote", label: "Remote" },
+  ];
+
+  // ── Data state ────────────────────────────────────────────────────
+  let deviceInfo = $state<SystemInfo | null>(null);
+  let plugins = $state<PluginSummary[]>([]);
+  let providers = $state<ProviderListResult | null>(null);
+  let resources = $state<ResourceItem[]>([]);
+  let loading = $state<string | null>(null);
+
+  // Settings sliders (local mirror, synced on fetch)
+  let brightness = $state(80);
+  let volume = $state(70);
+  let brightnessPending = $state(false);
+  let volumePending = $state(false);
+
+  // Resource import form
+  let importName = $state("");
+  let importUri = $state("");
+  let importMime = $state("image/svg+xml");
+  let importTags = $state("");
+  let importPending = $state(false);
+
+  // ── Connection ────────────────────────────────────────────────────
   async function doConnect() {
     connecting = true;
     error = null;
     try {
       await client.connect(wsUrl);
       connected = true;
+      // Auto-load data after connect
+      await refreshAll();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
       connected = false;
@@ -29,21 +73,148 @@
     client.disconnect();
     connected = false;
     deviceInfo = null;
+    plugins = [];
+    resources = [];
   }
 
-  async function getDeviceInfo() {
-    if (!connected) {
-      error = "Not connected.";
-      return;
-    }
-    loading = true;
+  // ── Data refresh ──────────────────────────────────────────────────
+  async function refreshAll() {
+    if (!connected) return;
     error = null;
     try {
+      await Promise.all([
+        refreshDeviceInfo(),
+        refreshPlugins(),
+        refreshResources(),
+      ]);
+    } catch (_) {
+      // individual refresh functions set error
+    }
+  }
+
+  async function refreshDeviceInfo() {
+    try {
       deviceInfo = (await client.call("system.getInfo")) as SystemInfo;
+      if (deviceInfo.brightness != null) brightness = deviceInfo.brightness;
+      if (deviceInfo.volume != null) volume = deviceInfo.volume;
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function refreshPlugins() {
+    try {
+      const result = (await client.call("plugin.list")) as PluginListResult;
+      plugins = result.plugins ?? [];
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function refreshResources() {
+    try {
+      const result = (await client.call("resource.list", {})) as ResourceListResult;
+      resources = result.resources ?? [];
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // ── Settings actions ──────────────────────────────────────────────
+  async function setBrightness(value: number) {
+    brightnessPending = true;
+    try {
+      const result = (await client.call("system.setBrightness", {
+        value,
+      })) as SetBrightnessResult;
+      brightness = result.brightness;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      brightnessPending = false;
+    }
+  }
+
+  async function setVolume(value: number) {
+    volumePending = true;
+    try {
+      const result = (await client.call("system.setVolume", {
+        value,
+      })) as SetVolumeResult;
+      volume = result.volume;
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      volumePending = false;
+    }
+  }
+
+  // ── Plugin actions ────────────────────────────────────────────────
+  async function activatePlugin(id: string) {
+    loading = "Activating plugin…";
+    try {
+      await client.call("plugin.activate", { id });
+      await refreshPlugins();
+      await refreshDeviceInfo();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = null;
+    }
+  }
+
+  async function deactivatePlugin() {
+    loading = "Deactivating plugin…";
+    try {
+      await client.call("plugin.deactivate", {});
+      await refreshPlugins();
+      await refreshDeviceInfo();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = null;
+    }
+  }
+
+  // ── Resource actions ──────────────────────────────────────────────
+  async function importResource() {
+    if (!importName || !importUri) return;
+    importPending = true;
+    try {
+      await client.call("resource.import", {
+        name: importName,
+        uri: importUri,
+        mimeType: importMime || "image/svg+xml",
+        tags: importTags
+          ? importTags.split(",").map((t) => t.trim()).filter(Boolean)
+          : [],
+      });
+      importName = "";
+      importUri = "";
+      importTags = "";
+      await refreshResources();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      importPending = false;
+    }
+  }
+
+  // ── Remote key actions ────────────────────────────────────────────
+  async function sendKey(key: RemoteKey, action: string = "press") {
+    loading = `Sending ${key}…`;
+    try {
+      const result = (await client.call("remote.key", {
+        key,
+        action,
+      })) as RemoteKeyResult;
+      if (!result.accepted) {
+        error = `Key "${key}" was not accepted by the device.`;
+      }
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = null;
     }
   }
 </script>
@@ -57,11 +228,11 @@
   <header class="header">
     <p class="eyebrow">HuaFrame</p>
     <h1>Web Studio</h1>
-    <p class="subtitle">Step 5 — Remote JSON-RPC Client</p>
+    <p class="subtitle">Remote Management Dashboard</p>
   </header>
 
+  <!-- ═══ Connection bar ═══════════════════════════════════════════ -->
   <section class="panel">
-    <!-- Connection controls -->
     <div class="connect-row">
       <input
         type="text"
@@ -91,77 +262,298 @@
       {#if error}
         <span class="badge err">Error</span>
       {/if}
+      {#if loading}
+        <span class="badge waiting">{loading}</span>
+      {/if}
     </div>
 
-    <!-- Action -->
-    <button class="btn btn-action" onclick={getDeviceInfo} disabled={!connected || loading}>
-      {#if loading}
-        Fetching…
-      {:else}
-        system.getInfo()
-      {/if}
-    </button>
-
-    <!-- Error display -->
     {#if error}
       <div class="error-box">
         <p class="error-title">Error</p>
         <pre class="error-body">{error}</pre>
-      </div>
-    {/if}
-
-    <!-- Result display -->
-    {#if deviceInfo}
-      <div class="result">
-        <h2>System Info</h2>
-        <dl>
-          <dt>App Version</dt>
-          <dd>{deviceInfo.appVersion}</dd>
-
-          <dt>Device Name</dt>
-          <dd>{deviceInfo.deviceName}</dd>
-
-          <dt>Platform</dt>
-          <dd>{deviceInfo.platform}</dd>
-
-          {#if deviceInfo.model}
-            <dt>Model</dt>
-            <dd>{deviceInfo.model}</dd>
-          {/if}
-
-          <dt>Screen</dt>
-          <dd>{deviceInfo.screen.width} × {deviceInfo.screen.height}
-            {#if deviceInfo.screen.scaleFactor}
-              @ {deviceInfo.screen.scaleFactor}x
-            {/if}
-          </dd>
-
-          <dt>Network</dt>
-          <dd>
-            {deviceInfo.network.online ? "Online" : "Offline"}
-            {#if deviceInfo.network.addresses?.length}
-              — {deviceInfo.network.addresses.join(", ")}
-            {/if}
-          </dd>
-
-          {#if deviceInfo.battery}
-            <dt>Battery</dt>
-            <dd>
-              {deviceInfo.battery.level != null ? deviceInfo.battery.level + "%" : "Unknown"}
-              {#if deviceInfo.battery.charging != null}
-                ({deviceInfo.battery.charging ? "Charging" : "Not charging"})
-              {/if}
-            </dd>
-          {/if}
-
-          {#if deviceInfo.activePluginId}
-            <dt>Active Plugin</dt>
-            <dd>{deviceInfo.activePluginId}</dd>
-          {/if}
-        </dl>
+        <button class="btn-dismiss" onclick={() => (error = null)}>Dismiss</button>
       </div>
     {/if}
   </section>
+
+  <!-- ═══ Tab bar ══════════════════════════════════════════════════ -->
+  {#if connected}
+    <nav class="tab-bar">
+      {#each tabs as tab}
+        <button
+          class="tab-btn"
+          class:active={activeTab === tab.id}
+          onclick={() => (activeTab = tab.id)}
+        >
+          {tab.label}
+        </button>
+      {/each}
+    </nav>
+
+    <!-- ═══ Device tab ═════════════════════════════════════════════ -->
+    {#if activeTab === "device"}
+      <section class="panel">
+        <button class="btn btn-action" onclick={refreshDeviceInfo} disabled={!connected}>
+          Refresh Device Info
+        </button>
+
+        {#if deviceInfo}
+          <div class="card">
+            <h2>System Info</h2>
+            <dl>
+              <dt>App Version</dt>
+              <dd>{deviceInfo.appVersion}</dd>
+
+              <dt>Device Name</dt>
+              <dd>{deviceInfo.deviceName}</dd>
+
+              <dt>Platform</dt>
+              <dd>{deviceInfo.platform}</dd>
+
+              {#if deviceInfo.model}
+                <dt>Model</dt>
+                <dd>{deviceInfo.model}</dd>
+              {/if}
+
+              <dt>Screen</dt>
+              <dd>
+                {deviceInfo.screen.width} × {deviceInfo.screen.height}
+                {#if deviceInfo.screen.scaleFactor}
+                  @ {deviceInfo.screen.scaleFactor}x
+                {/if}
+              </dd>
+
+              <dt>Network</dt>
+              <dd>
+                {deviceInfo.network.online ? "Online" : "Offline"}
+                {#if deviceInfo.network.addresses?.length}
+                  — {deviceInfo.network.addresses.join(", ")}
+                {/if}
+              </dd>
+
+              {#if deviceInfo.battery}
+                <dt>Battery</dt>
+                <dd>
+                  {deviceInfo.battery.level != null ? deviceInfo.battery.level + "%" : "Unknown"}
+                  {#if deviceInfo.battery.charging != null}
+                    ({deviceInfo.battery.charging ? "Charging" : "Not charging"})
+                  {/if}
+                </dd>
+              {/if}
+
+              {#if deviceInfo.activePluginId}
+                <dt>Active Plugin</dt>
+                <dd>{deviceInfo.activePluginId}</dd>
+              {/if}
+
+              <dt>Brightness</dt>
+              <dd>{deviceInfo.brightness ?? "—"}%</dd>
+
+              <dt>Volume</dt>
+              <dd>{deviceInfo.volume ?? "—"}%</dd>
+            </dl>
+          </div>
+
+          <!-- Settings controls -->
+          <div class="card">
+            <h2>Device Settings</h2>
+
+            <div class="slider-group">
+              <label class="slider-label" for="brightness-slider">
+                Brightness: <strong>{brightness}%</strong>
+              </label>
+              <input
+                id="brightness-slider"
+                type="range"
+                min="0"
+                max="100"
+                bind:value={brightness}
+                onchange={(e: Event) => {
+                  const v = parseInt((e.target as HTMLInputElement).value);
+                  setBrightness(v);
+                }}
+                disabled={brightnessPending}
+                class="slider"
+              />
+            </div>
+
+            <div class="slider-group">
+              <label class="slider-label" for="volume-slider">
+                Volume: <strong>{volume}%</strong>
+              </label>
+              <input
+                id="volume-slider"
+                type="range"
+                min="0"
+                max="100"
+                bind:value={volume}
+                onchange={(e: Event) => {
+                  const v = parseInt((e.target as HTMLInputElement).value);
+                  setVolume(v);
+                }}
+                disabled={volumePending}
+                class="slider"
+              />
+            </div>
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <!-- ═══ Plugins tab ═════════════════════════════════════════════ -->
+    {#if activeTab === "plugins"}
+      <section class="panel">
+        <button class="btn btn-action" onclick={refreshPlugins} disabled={!connected}>
+          Refresh Plugins
+        </button>
+
+        {#if plugins.length === 0}
+          <p class="empty">No plugins registered on this device.</p>
+        {:else}
+          <div class="card">
+            <h2>Installed Plugins ({plugins.length})</h2>
+            <div class="plugin-list">
+              {#each plugins as plugin}
+                <div class="plugin-row" class:plugin-active={plugin.active}>
+                  <div class="plugin-info">
+                    <span class="plugin-name">{plugin.name}</span>
+                    <span class="plugin-id">{plugin.id}</span>
+                    <span class="plugin-meta">v{plugin.version} · {plugin.type}</span>
+                  </div>
+                  <div class="plugin-actions">
+                    {#if plugin.active}
+                      <span class="badge ok">Active</span>
+                      <button class="btn btn-sm btn-deact" onclick={deactivatePlugin}>
+                        Deactivate
+                      </button>
+                    {:else}
+                      <button
+                        class="btn btn-sm btn-act"
+                        onclick={() => activatePlugin(plugin.id)}
+                      >
+                        Activate
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <!-- ═══ Resources tab ═══════════════════════════════════════════ -->
+    {#if activeTab === "resources"}
+      <section class="panel">
+        <button class="btn btn-action" onclick={refreshResources} disabled={!connected}>
+          Refresh Resources
+        </button>
+
+        <!-- Import form -->
+        <div class="card">
+          <h2>Import Resource</h2>
+          <div class="import-form">
+            <input
+              type="text"
+              class="field"
+              bind:value={importName}
+              placeholder="Resource name"
+            />
+            <input
+              type="text"
+              class="field"
+              bind:value={importUri}
+              placeholder="Data URI or URL"
+            />
+            <div class="import-row">
+              <input
+                type="text"
+                class="field field-sm"
+                bind:value={importMime}
+                placeholder="image/svg+xml"
+              />
+              <input
+                type="text"
+                class="field field-sm"
+                bind:value={importTags}
+                placeholder="tag1, tag2, tag3"
+              />
+            </div>
+            <button
+              class="btn btn-connect"
+              onclick={importResource}
+              disabled={importPending || !importName || !importUri}
+            >
+              {importPending ? "Importing…" : "Import"}
+            </button>
+          </div>
+        </div>
+
+        <!-- Resource gallery -->
+        {#if resources.length === 0}
+          <p class="empty">No resources on this device.</p>
+        {:else}
+          <div class="card">
+            <h2>Resource Library ({resources.length})</h2>
+            <div class="resource-grid">
+              {#each resources as res}
+                <div class="resource-card">
+                  <div class="resource-thumb">
+                    <img src={res.uri} alt={res.name} />
+                  </div>
+                  <div class="resource-body">
+                    <p class="resource-name">{res.name}</p>
+                    <p class="resource-kind">{res.kind} · {res.mimeType}</p>
+                    <div class="tag-row">
+                      {#each res.tags as tag}
+                        <span class="tag">{tag}</span>
+                      {/each}
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </section>
+    {/if}
+
+    <!-- ═══ Remote tab ══════════════════════════════════════════════ -->
+    {#if activeTab === "remote"}
+      <section class="panel">
+        <div class="card">
+          <h2>Remote Control</h2>
+          <p class="hint">Send directional and action key commands to the frame device.</p>
+
+          <!-- D-pad -->
+          <div class="dpad">
+            <div class="dpad-row">
+              <button class="key-btn" onclick={() => sendKey("up")} title="Up">▲</button>
+            </div>
+            <div class="dpad-row">
+              <button class="key-btn" onclick={() => sendKey("left")} title="Left">◀</button>
+              <button class="key-btn key-center" onclick={() => sendKey("ok")} title="OK">OK</button>
+              <button class="key-btn" onclick={() => sendKey("right")} title="Right">▶</button>
+            </div>
+            <div class="dpad-row">
+              <button class="key-btn" onclick={() => sendKey("down")} title="Down">▼</button>
+            </div>
+          </div>
+
+          <!-- Action buttons -->
+          <div class="action-keys">
+            <button class="btn btn-action-key" onclick={() => sendKey("back")}>
+              ◀ Back
+            </button>
+            <button class="btn btn-action-key" onclick={() => sendKey("menu")}>
+              ☰ Menu
+            </button>
+          </div>
+        </div>
+      </section>
+    {/if}
+  {/if}
 </main>
 
 <style>
@@ -179,13 +571,13 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 32px 24px;
+    padding: 32px 24px 64px;
     box-sizing: border-box;
   }
 
   .header {
     text-align: center;
-    margin-bottom: 32px;
+    margin-bottom: 24px;
   }
 
   .eyebrow {
@@ -212,10 +604,10 @@
   }
 
   .panel {
-    width: min(100%, 640px);
+    width: min(100%, 720px);
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
   }
 
   /* ── Connection row ─────────────────────────────── */
@@ -281,8 +673,8 @@
   }
 
   .btn-action {
-    padding: 14px 28px;
-    font-size: 1.05rem;
+    padding: 10px 20px;
+    font-size: 0.9rem;
     background: #1a3a36;
     color: #ffffff;
   }
@@ -291,10 +683,50 @@
     background: #2d5450;
   }
 
+  .btn-sm {
+    padding: 6px 14px;
+    font-size: 0.82rem;
+  }
+
+  .btn-act {
+    background: #2f746f;
+    color: #ffffff;
+  }
+
+  .btn-act:hover:not(:disabled) {
+    background: #3a8f89;
+  }
+
+  .btn-deact {
+    background: #c0d0cc;
+    color: #1d2522;
+  }
+
+  .btn-deact:hover:not(:disabled) {
+    background: #d4e0dc;
+  }
+
+  .btn-dismiss {
+    margin-top: 8px;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    border: 1px solid #f0a0a8;
+    border-radius: 6px;
+    background: transparent;
+    color: #8a1a2a;
+    cursor: pointer;
+  }
+
+  .btn-dismiss:hover {
+    background: #fad4d8;
+  }
+
   /* ── Status badges ──────────────────────────────── */
   .status-row {
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
   .badge {
@@ -329,6 +761,124 @@
     border: 1px solid #f0a0a8;
   }
 
+  /* ── Tab bar ────────────────────────────────────── */
+  .tab-bar {
+    width: min(100%, 720px);
+    display: flex;
+    gap: 4px;
+    margin: 20px 0 0;
+    background: #eef2f0;
+    border-radius: 10px;
+    padding: 4px;
+  }
+
+  .tab-btn {
+    flex: 1;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: #6b8880;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .tab-btn:hover {
+    color: #1d2522;
+    background: rgb(29 37 34 / 6%);
+  }
+
+  .tab-btn.active {
+    background: #ffffff;
+    color: #1a3a36;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+  }
+
+  /* ── Cards ──────────────────────────────────────── */
+  .card {
+    background: #ffffff;
+    border: 1px solid #d7e0e2;
+    border-radius: 8px;
+    padding: 24px;
+    box-shadow: 0 4px 24px rgb(29 37 34 / 6%);
+  }
+
+  .card h2 {
+    margin: 0 0 16px;
+    font-size: 1.1rem;
+    color: #2f746f;
+  }
+
+  .hint {
+    margin: 0 0 16px;
+    font-size: 0.88rem;
+    color: #6b8880;
+  }
+
+  dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px 16px;
+  }
+
+  dt {
+    font-weight: 600;
+    color: #6b8880;
+  }
+
+  dd {
+    margin: 0;
+    color: #1d2522;
+  }
+
+  .empty {
+    text-align: center;
+    color: #6b8880;
+    padding: 24px 0;
+    font-size: 0.95rem;
+  }
+
+  /* ── Settings sliders ───────────────────────────── */
+  .slider-group {
+    margin-bottom: 16px;
+  }
+
+  .slider-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.9rem;
+    color: #1d2522;
+  }
+
+  .slider {
+    width: 100%;
+    height: 6px;
+    appearance: none;
+    background: #d7e0e2;
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  .slider::-webkit-slider-thumb {
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #2f746f;
+    cursor: pointer;
+    border: 2px solid white;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 15%);
+  }
+
+  .slider:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   /* ── Error ───────────────────────────────────────── */
   .error-box {
     background: #fef0f2;
@@ -351,35 +901,235 @@
     word-break: break-word;
   }
 
-  /* ── Result ──────────────────────────────────────── */
-  .result {
-    background: #ffffff;
-    border: 1px solid #d7e0e2;
+  /* ── Plugin list ────────────────────────────────── */
+  .plugin-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .plugin-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
     border-radius: 8px;
-    padding: 24px;
-    box-shadow: 0 4px 24px rgb(29 37 34 / 6%);
+    border: 1px solid #d7e0e2;
+    background: #fafbfb;
+    gap: 12px;
   }
 
-  .result h2 {
-    margin: 0 0 16px;
-    font-size: 1.2rem;
-    color: #2f746f;
+  .plugin-row.plugin-active {
+    border-color: #a0d8c8;
+    background: #f6fdfb;
   }
 
-  dl {
-    margin: 0;
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 8px 16px;
+  .plugin-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
   }
 
-  dt {
+  .plugin-name {
     font-weight: 600;
+    color: #1d2522;
+  }
+
+  .plugin-id {
+    font-size: 0.78rem;
+    font-family: "JetBrains Mono", monospace;
     color: #6b8880;
   }
 
-  dd {
-    margin: 0;
+  .plugin-meta {
+    font-size: 0.78rem;
+    color: #a0b5b0;
+  }
+
+  .plugin-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  /* ── Import form ────────────────────────────────── */
+  .import-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .field {
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    border: 1px solid #c0d0cc;
+    border-radius: 8px;
+    background: #ffffff;
     color: #1d2522;
+    outline: none;
+    font-family: inherit;
+  }
+
+  .field:focus {
+    border-color: #2f746f;
+    box-shadow: 0 0 0 2px rgb(47 116 111 / 20%);
+  }
+
+  .field-sm {
+    flex: 1;
+  }
+
+  .import-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  /* ── Resource grid ──────────────────────────────── */
+  .resource-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+    margin-top: 8px;
+  }
+
+  .resource-card {
+    border: 1px solid #d7e0e2;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #fafbfb;
+    transition: box-shadow 0.15s;
+  }
+
+  .resource-card:hover {
+    box-shadow: 0 4px 16px rgb(29 37 34 / 10%);
+  }
+
+  .resource-thumb {
+    width: 100%;
+    height: 120px;
+    overflow: hidden;
+    background: #eef2f0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .resource-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .resource-body {
+    padding: 10px 12px;
+  }
+
+  .resource-name {
+    margin: 0;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: #1d2522;
+  }
+
+  .resource-kind {
+    margin: 2px 0 6px;
+    font-size: 0.75rem;
+    color: #a0b5b0;
+  }
+
+  .tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 999px;
+    background: #eef2f0;
+    color: #6b8880;
+  }
+
+  /* ── Remote D-pad ───────────────────────────────── */
+  .dpad {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin: 20px 0;
+  }
+
+  .dpad-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .key-btn {
+    width: 64px;
+    height: 64px;
+    border: 2px solid #c0d0cc;
+    border-radius: 12px;
+    background: #ffffff;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #1d2522;
+    cursor: pointer;
+    transition: all 0.12s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .key-btn:hover {
+    background: #eef9f7;
+    border-color: #2f746f;
+    color: #2f746f;
+  }
+
+  .key-btn:active {
+    background: #d4f0e8;
+    transform: scale(0.95);
+  }
+
+  .key-center {
+    width: 80px;
+    height: 64px;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+  }
+
+  .action-keys {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 16px;
+  }
+
+  .btn-action-key {
+    padding: 12px 24px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border: 2px solid #c0d0cc;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #1d2522;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+
+  .btn-action-key:hover {
+    background: #eef9f7;
+    border-color: #2f746f;
+    color: #2f746f;
+  }
+
+  .btn-action-key:active {
+    background: #d4f0e8;
+    transform: scale(0.97);
   }
 </style>

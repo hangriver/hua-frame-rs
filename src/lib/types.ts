@@ -145,6 +145,95 @@ export interface RemoteKeyResult {
   accepted: boolean;
 }
 
+// ─── Schedule types ──────────────────────────────────────────────────
+
+export interface TimePeriod {
+  start: string;
+  end: string;
+}
+
+export interface ScreenOnSchedule {
+  weekday: TimePeriod[];
+  holiday: TimePeriod[];
+}
+
+export interface BrightnessPeriod {
+  start: string;
+  end: string;
+  value: number;
+}
+
+export interface BrightnessSchedule {
+  periods: BrightnessPeriod[];
+}
+
+// ─── Settings type ───────────────────────────────────────────────────
+
+export interface Settings {
+  schemaVersion: number;
+  activePluginId?: string;
+  brightness: {
+    value: number;
+    mode: "system" | "window_fallback";
+  };
+  volume: number;
+  screenOnSchedule: ScreenOnSchedule;
+  brightnessSchedule: BrightnessSchedule;
+}
+
+// ─── Dashboard data types ────────────────────────────────────────────
+
+export interface WeatherData {
+  temperature: number;
+  humidity?: number;
+  condition: string;
+  iconCode?: number;
+  location?: string;
+}
+
+export interface MarketQuote {
+  symbol: string;
+  name: string;
+  price: number;
+  change?: number;
+  changePercent?: number;
+  currency?: string;
+  error?: string;
+}
+
+export interface DashboardData {
+  weather?: WeatherData;
+  market: MarketQuote[];
+  updatedAt: number;
+}
+
+// ─── New RPC result wrappers ─────────────────────────────────────────
+
+export interface ResourceUploadResult {
+  resource: ResourceItem;
+}
+
+export interface SettingsGetResult extends Settings {}
+
+export interface SettingsUpdateResult {
+  accepted: boolean;
+}
+
+export interface DisplayScheduleResult {
+  screenOn: ScreenOnSchedule;
+  brightness: BrightnessSchedule;
+}
+
+export interface DisplayScheduleUpdateResult {
+  accepted: boolean;
+}
+
+export interface DashboardDataResult extends DashboardData {}
+
+export interface AppExitResult {
+  accepted: boolean;
+}
+
 // ─── JSON-RPC 2.0 envelopes ──────────────────────────────────────────
 
 export interface JsonRpcRequest {

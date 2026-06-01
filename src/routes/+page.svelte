@@ -5,12 +5,20 @@
     PluginSummary,
     ResourceItem,
     RemoteKey,
+    Settings,
+    ScreenOnSchedule,
+    BrightnessSchedule,
     PluginListResult,
     ProviderListResult,
     ResourceListResult,
+    ResourceUploadResult,
     SetBrightnessResult,
     SetVolumeResult,
     RemoteKeyResult,
+    SettingsUpdateResult,
+    DisplayScheduleResult,
+    DisplayScheduleUpdateResult,
+    AppExitResult,
   } from "$lib/types";
 
   // ── Connection state ──────────────────────────────────────────────
@@ -22,13 +30,14 @@
   const client = new JsonRpcClient();
 
   // ── Tab state ─────────────────────────────────────────────────────
-  type Tab = "device" | "plugins" | "resources" | "remote";
+  type Tab = "device" | "plugins" | "resources" | "settings" | "remote";
   let activeTab = $state<Tab>("device");
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "device", label: "Device" },
     { id: "plugins", label: "Plugins" },
     { id: "resources", label: "Resources" },
+    { id: "settings", label: "Settings" },
     { id: "remote", label: "Remote" },
   ];
 
@@ -51,6 +60,17 @@
   let importMime = $state("image/svg+xml");
   let importTags = $state("");
   let importPending = $state(false);
+
+  // File upload
+  let uploadFile = $state<File | null>(null);
+  let uploadPending = $state(false);
+  let uploadError = $state<string | null>(null);
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
+  // Settings state
+  let deviceSettings = $state<Settings | null>(null);
+  let displaySchedule = $state<DisplayScheduleResult | null>(null);
+  let settingsPending = $state(false);
 
   // ── Connection ────────────────────────────────────────────────────
   async function doConnect() {
@@ -219,6 +239,113 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = null;
+    }
+  }
+
+  // ── File upload ──────────────────────────────────────────────────
+  function onFileSelected(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      uploadFile = input.files[0];
+      uploadError = null;
+      // Auto-fill name from filename.
+      if (!importName) {
+        importName = uploadFile.name.replace(/\.[^.]+$/, "");
+      }
+      importMime = uploadFile.type || "image/jpeg";
+    }
+  }
+
+  async function uploadResourceFile() {
+    if (!uploadFile) return;
+    if (uploadFile.size > MAX_FILE_SIZE) {
+      uploadError = `File too large: ${(uploadFile.size / 1024 / 1024).toFixed(1)} MB (max 10 MB)`;
+      return;
+    }
+    uploadPending = true;
+    uploadError = null;
+    const file = uploadFile; // capture non-null for TS narrowing
+    if (!file) return;
+    try {
+      // Read file as base64.
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Strip data:...;base64, prefix.
+          const comma = result.indexOf(",");
+          resolve(comma >= 0 ? result.substring(comma + 1) : result);
+        };
+        reader.onerror = () => reject(new Error("Failed to read file"));
+        reader.readAsDataURL(file);
+      });
+
+      await client.call("resource.upload", {
+        name: importName || file.name,
+        data,
+        mimeType: importMime || file.type || "image/jpeg",
+        tags: ["movie-poster"],
+      });
+
+      uploadFile = null;
+      importName = "";
+      // Reset the file input.
+      const fileInput = document.getElementById("file-input") as HTMLInputElement;
+      if (fileInput) fileInput.value = "";
+      await refreshResources();
+    } catch (e: unknown) {
+      uploadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      uploadPending = false;
+    }
+  }
+
+  // ── Settings management ───────────────────────────────────────────
+  async function refreshSettings() {
+    settingsPending = true;
+    try {
+      deviceSettings = (await client.call("settings.get")) as Settings;
+      if (deviceSettings.brightness) {
+        brightness = deviceSettings.brightness.value;
+      }
+      if (deviceSettings.volume != null) {
+        volume = deviceSettings.volume;
+      }
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    try {
+      displaySchedule = (await client.call("display.getSchedule")) as DisplayScheduleResult;
+    } catch (e: unknown) {
+      // schedules not critical
+    }
+    settingsPending = false;
+  }
+
+  async function updateSetting(key: string, value: unknown) {
+    try {
+      await client.call("settings.update", { key, value });
+      await refreshSettings();
+      await refreshDeviceInfo();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function updateDisplaySchedule(type: "screenOn" | "brightness", schedule: unknown) {
+    try {
+      await client.call("display.updateSchedule", { type, schedule });
+      await refreshSettings();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function exitApp() {
+    try {
+      await client.call("app.exit", {});
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 </script>
@@ -454,16 +581,51 @@
           Refresh Resources
         </button>
 
-        <!-- Import form -->
+        <!-- File upload form -->
         <div class="card">
-          <h2>Import Resource</h2>
+          <h2>Upload Poster Image</h2>
           <div class="import-form">
+            <label class="file-label" for="file-input">
+              <div class="file-drop-zone">
+                {#if uploadFile}
+                  <p class="file-name">{uploadFile.name}</p>
+                  <p class="file-size">{(uploadFile.size / 1024).toFixed(1)} KB</p>
+                {:else}
+                  <p class="file-hint">Click to select an image file</p>
+                  <p class="file-limit">Max 10 MB · JPEG, PNG, GIF, WebP, SVG</p>
+                {/if}
+              </div>
+              <input
+                id="file-input"
+                type="file"
+                accept="image/*"
+                class="file-input-hidden"
+                onchange={onFileSelected}
+              />
+            </label>
             <input
               type="text"
               class="field"
               bind:value={importName}
-              placeholder="Resource name"
+              placeholder="Resource name (optional)"
             />
+            <button
+              class="btn btn-connect"
+              onclick={uploadResourceFile}
+              disabled={uploadPending || !uploadFile}
+            >
+              {uploadPending ? "Uploading…" : "Upload"}
+            </button>
+            {#if uploadError}
+              <p class="upload-error">{uploadError}</p>
+            {/if}
+          </div>
+        </div>
+
+        <!-- URI import form (advanced) -->
+        <details class="card details-card">
+          <summary><h2 style="display:inline">Import via URI (advanced)</h2></summary>
+          <div class="import-form" style="margin-top:12px">
             <input
               type="text"
               class="field"
@@ -492,7 +654,7 @@
               {importPending ? "Importing…" : "Import"}
             </button>
           </div>
-        </div>
+        </details>
 
         <!-- Resource gallery -->
         {#if resources.length === 0}
@@ -519,6 +681,125 @@
               {/each}
             </div>
           </div>
+        {/if}
+      </section>
+    {/if}
+
+    <!-- ═══ Settings tab ═══════════════════════════════════════════ -->
+    {#if activeTab === "settings"}
+      <section class="panel">
+        <button class="btn btn-action" onclick={refreshSettings} disabled={!connected || settingsPending}>
+          {settingsPending ? "Loading…" : "Refresh Settings"}
+        </button>
+
+        {#if deviceSettings}
+          <!-- Active plugin -->
+          <div class="card">
+            <h2>Active Plugin</h2>
+            {#if deviceSettings.activePluginId}
+              <p class="setting-value">{deviceSettings.activePluginId}</p>
+            {:else}
+              <p class="empty">No active plugin.</p>
+            {/if}
+            {#if plugins.length > 0}
+              <div class="plugin-list" style="margin-top:12px">
+                {#each plugins as plugin}
+                  <div class="plugin-row" class:plugin-active={plugin.active}>
+                    <div class="plugin-info">
+                      <span class="plugin-name">{plugin.name}</span>
+                      <span class="plugin-id">{plugin.id}</span>
+                    </div>
+                    <div class="plugin-actions">
+                      {#if plugin.active}
+                        <span class="badge ok">Active</span>
+                      {:else}
+                        <button class="btn btn-sm btn-act" onclick={() => updateSetting("activePluginId", plugin.id)}>
+                          Set Active
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Brightness & Volume -->
+          <div class="card">
+            <h2>Brightness &amp; Volume</h2>
+            <div class="slider-group">
+              <label class="slider-label" for="settings-brightness">
+                Brightness: <strong>{brightness}%</strong>
+                <span class="mode-badge">{deviceSettings?.brightness.mode ?? "window_fallback"}</span>
+              </label>
+              <input id="settings-brightness" type="range" min="0" max="100"
+                value={brightness}
+                onchange={(e: Event) => {
+                  const v = parseInt((e.target as HTMLInputElement).value);
+                  const mode = deviceSettings?.brightness.mode ?? "window_fallback";
+                  updateSetting("brightness", { value: v, mode });
+                }}
+                class="slider" />
+            </div>
+            <div class="slider-group">
+              <label class="slider-label" for="settings-volume">
+                Volume: <strong>{volume}%</strong>
+              </label>
+              <input id="settings-volume" type="range" min="0" max="100"
+                value={volume}
+                onchange={(e: Event) => {
+                  const v = parseInt((e.target as HTMLInputElement).value);
+                  updateSetting("volume", v);
+                }}
+                class="slider" />
+            </div>
+          </div>
+
+          <!-- Screen-on schedule -->
+          <div class="card">
+            <h2>Screen-On Schedule</h2>
+            {#if displaySchedule}
+              <div class="schedule-section">
+                <p class="schedule-title">Weekday</p>
+                {#each displaySchedule.screenOn.weekday as period}
+                  <span class="tag">{period.start} – {period.end}</span>
+                {/each}
+              </div>
+              <div class="schedule-section">
+                <p class="schedule-title">Holiday (Weekend)</p>
+                {#each displaySchedule.screenOn.holiday as period}
+                  <span class="tag">{period.start} – {period.end}</span>
+                {/each}
+              </div>
+            {:else}
+              <p class="empty">No schedule data.</p>
+            {/if}
+          </div>
+
+          <!-- Brightness schedule -->
+          <div class="card">
+            <h2>Brightness Schedule</h2>
+            {#if displaySchedule}
+              {#each displaySchedule.brightness.periods as period}
+                <div class="schedule-section">
+                  <span class="tag">{period.start} – {period.end}</span>
+                  <span class="schedule-value">{period.value}%</span>
+                </div>
+              {/each}
+            {:else}
+              <p class="empty">No schedule data.</p>
+            {/if}
+          </div>
+
+          <!-- Exit app -->
+          <div class="card">
+            <h2>App Control</h2>
+            <button class="btn btn-exit" onclick={exitApp}>
+              Exit Application
+            </button>
+          </div>
+        {:else}
+          <p class="empty">Settings not loaded. Connect to a device and refresh.</p>
         {/if}
       </section>
     {/if}
@@ -1135,5 +1416,130 @@
   .btn-action-key:active {
     background: #d4f0e8;
     transform: scale(0.97);
+  }
+
+  /* ── File upload ──────────────────────────────────── */
+  .file-label {
+    display: block;
+    cursor: pointer;
+  }
+
+  .file-input-hidden {
+    display: none;
+  }
+
+  .file-drop-zone {
+    border: 2px dashed #c0d0cc;
+    border-radius: 10px;
+    padding: 28px 20px;
+    text-align: center;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .file-drop-zone:hover {
+    border-color: #2f746f;
+    background: #f6fdfb;
+  }
+
+  .file-hint {
+    margin: 0;
+    font-size: 0.95rem;
+    color: #1d2522;
+    font-weight: 600;
+  }
+
+  .file-limit {
+    margin: 4px 0 0;
+    font-size: 0.75rem;
+    color: #a0b5b0;
+  }
+
+  .file-name {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #2f746f;
+  }
+
+  .file-size {
+    margin: 4px 0 0;
+    font-size: 0.78rem;
+    color: #6b8880;
+  }
+
+  .upload-error {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #8a1a2a;
+    font-weight: 600;
+  }
+
+  .details-card {
+    border: 1px solid #d7e0e2;
+    border-radius: 8px;
+    padding: 16px 24px;
+    background: #fafbfb;
+    cursor: pointer;
+  }
+
+  .details-card summary {
+    font-weight: 600;
+    color: #6b8880;
+    font-size: 0.9rem;
+  }
+
+  /* ── Settings tab ─────────────────────────────────── */
+  .setting-value {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.85rem;
+    color: #2f746f;
+    margin: 0;
+    word-break: break-all;
+  }
+
+  .mode-badge {
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #eef2f0;
+    color: #2f746f;
+    margin-left: 6px;
+  }
+
+  .schedule-section {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .schedule-title {
+    font-size: 0.78rem;
+    color: #6b8880;
+    margin: 0;
+    min-width: 80px;
+  }
+
+  .schedule-value {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #2f746f;
+  }
+
+  .btn-exit {
+    padding: 10px 24px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border: 1px solid #d4a0a8;
+    border-radius: 8px;
+    background: #fef0f2;
+    color: #8a1a2a;
+    cursor: pointer;
+  }
+
+  .btn-exit:hover {
+    background: #fad4d8;
   }
 </style>
